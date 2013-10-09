@@ -1,0 +1,19 @@
+{
+    "name": "shonm/report",
+    "require": {
+        "knplabs/github-api": "1.1.*",
+        "symfony/console": "2.3.*",
+        "twig/twig": "1.14.*",
+        "symfony/process": "2.3.*",
+        "swiftmailer/swiftmailer": "5.0.*",
+        "symfony/yaml": "2.3.*"
+    },
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Shon M",
+            "email": "him@shonm.com"
+        }
+    ],
+    "minimum-stability": "dev"
+}

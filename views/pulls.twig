@@ -1,0 +1,12 @@
+{% spaceless %}
+{% if pulls %}
+    <h3>Pull Requests</h3>
+
+    {% for pull in pulls %}
+        <h4>[#123 - {{ pull.title }}]({{ pull.url }}) ({{ pull.from }} -> {{ pull.to }}, {{ pull.assignee }} is assigned)</h4>
+        <p>{{ pull.body }}</p>
+    {% endfor %}
+
+    ---
+{% endif %}
+{% endspaceless %}

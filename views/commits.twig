@@ -1,0 +1,13 @@
+{% spaceless %}
+{% if commits %}
+    <h3>Commits</h3>
+
+    <ul>
+        {% for commit in commits %}
+            <li>{{ commit.message }} ([{{ commit.sha }}]({{ commit.url }}, {{ commit.comments }} comments))</li>
+        {% endfor %}
+    </ul>
+
+    ---
+{% endif %}
+{% endspaceless %}

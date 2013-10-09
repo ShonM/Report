@@ -1,0 +1,15 @@
+{% spaceless %}
+{% if branches %}
+    {% for name, branch in branches %}
+        <h3>Commits on {{ name }}</h3>
+
+        <ul>
+            {% for commit in branch %}
+                <li>{{ commit.message }} ([{{ commit.sha }}]({{ commit.url }}, {{ commit.comments }} comments))</li>
+            {% endfor %}
+        </ul>
+    {% endfor %}
+
+    ---
+{% endif %}
+{% endspaceless %}

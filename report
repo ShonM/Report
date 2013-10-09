@@ -1,0 +1,271 @@
+#!/usr/bin/env php
+<?php
+
+require 'vendor/autoload.php';
+
+use Symfony\Component\Yaml\Yaml;
+use Symfony\Component\Process\Process;
+use Symfony\Component\Console\Application;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputArgument;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
+
+class GitHubCommand extends Command
+{
+    protected $client;
+
+    protected function configure()
+    {
+        $this
+            ->setName('github')
+            ->setDescription('Pulls commit and pull request data from GitHub')
+            ->setDefinition(array(
+                new InputArgument('emails', InputArgument::IS_ARRAY, 'Email(s) to send to'),
+                new InputOption('from', 'f', InputOption::VALUE_OPTIONAL, 'From email. When empty, will be fetched using author'),
+                new InputOption('token', 't', InputOption::VALUE_OPTIONAL, 'API Token. When set, username and password can be omitted'),
+                new InputOption('username', 'u', InputOption::VALUE_OPTIONAL, 'Username. When set, password is required and token can be omitted'),
+                new InputOption('password', 'p', InputOption::VALUE_OPTIONAL, 'Password. Required when username is set'),
+                new InputOption('author', 'a', InputOption::VALUE_OPTIONAL, 'Authors to pull from'),
+                new InputOption('organization', 'o', InputOption::VALUE_OPTIONAL, 'Organizations to pull from', 'ChessCom'),
+                new InputOption('repository', 'r', InputOption::VALUE_OPTIONAL, 'Repositories to pull from', 'chess'),
+                new InputOption('branch', 'b', InputOption::VALUE_IS_ARRAY | InputOption::VALUE_OPTIONAL, 'Branches used as a filter, will be guessed by default'),
+                new InputOption('dir', 'd', InputOption::VALUE_OPTIONAL, 'Directory used as a project root'),
+                new InputOption('since', 's', InputOption::VALUE_OPTIONAL, 'Only fetch data newer than this', 'today'),
+                new InputOption('smtp_server', null, InputOption::VALUE_OPTIONAL, 'SMTP server', 'smtp.gmail.com'),
+                new InputOption('smtp_port', null, InputOption::VALUE_OPTIONAL, 'SMTP port', 465),
+                new InputOption('smtp_username', null, InputOption::VALUE_OPTIONAL, 'SMTP username'),
+                new InputOption('smtp_password', null, InputOption::VALUE_OPTIONAL, 'SMTP password'),
+            ));
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output)
+    {
+        // Parse config.yml if it exists, and set all the configuration
+        $config = Yaml::parse(__DIR__ . '/config.yml');
+        foreach ($config as $key => $value) {
+            if ($input->hasArgument($key)) {
+                $input->setArgument($key, $value);
+            } elseif ($input->hasOption($key)) {
+                $input->setOption($key, $value);
+            } else {
+                throw new \RuntimeException('Unrecognized config key: ' . $key);
+            }
+        }
+
+        // Now we need to do some manual configuration validation since we skirt required validation
+        if (! $input->getArgument('emails')) {
+            throw new \RuntimeException('The emails argument is required');
+        }
+        if (! $input->getOption('author')) {
+            throw new \RuntimeException('The author option is required');
+        }
+
+        // These two could probably just be warnings, and then we just don't send an email out if they aren't set
+        if (! $input->getOption('smtp_username')) {
+            throw new \RuntimeException('The smtp_username option is required');
+        }
+        if (! $input->getOption('smtp_password')) {
+            throw new \RuntimeException('The smtp_password option is required');
+        }
+
+        $this->client = new Github\Client(
+            // new Github\HttpClient\CachedHttpClient(array('cache_dir' => __DIR__ . '/cache'))
+        );
+
+        $since = new DateTime($input->getOption('since'));
+
+        if ($input->getOption('token')) {
+            $this->client->authenticate($input->getOption('token'), null, Github\Client::AUTH_HTTP_TOKEN);
+        } elseif ($input->getOption('username') && $input->getOption('password')) {
+            $this->client->authenticate($input->getOption('username'), $input->getOption('password'), Github\Client::AUTH_HTTP_PASSWORD);
+        } else {
+            throw new \RuntimeException('Either token or username and password are required');
+        }
+
+        if (! $input->getOption('from') && $input->getOption('author')) {
+            $author = $this->client->api('user')->show($input->getOption('author'));
+            $input->setOption('from', $author['email']);
+        }
+
+        if (! $input->getOption('branch')) {
+            $input->setOption('branch', array_merge($input->getOption('branch'), $this->getBranches($input->getOption('dir'), $since)));
+        }
+
+        $loader = new Twig_Loader_Filesystem(__DIR__ . '/views');
+        $twig = new Twig_Environment($loader, array(
+            // 'cache' => __DIR__ . '/cache',
+        ));
+
+        $content = '';
+
+        if ($branches = $this->getCommitsForBranches($input->getOption('organization'), $input->getOption('repository'), $input->getOption('branch'), $input->getOption('author'), $since)) {
+            $content .= $twig->render('commits_for_branches.twig', array('branches' => $branches)) . PHP_EOL;
+        }
+
+        if ($pulls = $this->getPulls($input->getOption('organization'), $input->getOption('repository'), $input->getOption('author'), $since)) {
+            $content .= $twig->render('pulls.twig', array('pulls' => $pulls)) . PHP_EOL;
+        }
+
+        if (trim($content) === '') {
+            throw new \RuntimeException('There\'s currently no content to send');
+        }
+
+        // A layover location for the report message
+        $path = __DIR__ . '/cache/REPORT_EDITMSG';
+        file_put_contents($path, $content);
+
+        // Get the current editor
+        $process = new Process('git config core.editor');
+        $process->run();
+
+        // Send the message file to the editor
+        $process = new Process(trim($process->getOutput()) . ' ' . $path);
+        $process->run();
+
+        $content = $twig->render('layout.twig', array('content' => file_get_contents($path)));
+
+        $config = array(
+            'server'   => $input->getOption('smtp_server'),
+            'port'     => $input->getOption('smtp_port'),
+            'username' => $input->getOption('smtp_username'),
+            'password' => $input->getOption('smtp_password'),
+        );
+        $this->send($config, 'Report', $input->getOption('from'), $input->getArgument('emails'), html_entity_decode($content));
+    }
+
+    protected function send(array $config, $subject, $from, array $to, $content)
+    {
+        $transport = Swift_SmtpTransport::newInstance($config['server'], $config['port'], 'ssl')
+            ->setUsername($config['username'])
+            ->setPassword($config['password']);
+
+        $mailer = Swift_Mailer::newInstance($transport);
+
+        $message = Swift_Message::newInstance()
+            ->setSubject($subject)
+            ->setFrom($from)
+            ->setTo($to)
+            ->setBody($content, 'text/html');
+
+        $result = $mailer->send($message);
+    }
+
+    protected function getBranches($dir, DateTime $since)
+    {
+        $process = new Process("git for-each-ref --sort='-committerdate' --format='%(committerdate:short) %(refname)' refs/heads | sed -e 's-refs/heads/--'");
+        $process->setWorkingDirectory($dir);
+        $process->run();
+
+        $gitbranches = $process->getOutput();
+        $gitbranches = explode("\n", trim($gitbranches));
+
+        // Make sure we've been active on them since $since
+        $branches = array();
+        foreach ($gitbranches as $branch) {
+            list($date, $branch) = explode(' ', $branch);
+
+            if (new DateTime($date) < $since) {
+                continue;
+            }
+
+            $branches[] = $branch;
+        }
+
+        return $branches;
+    }
+
+    protected function getCommitsForBranches($organization, $repository, array $branches, $author, DateTime $since)
+    {
+        $commits = array();
+        foreach ($branches as $branch) {
+            if ($branchCommits = $this->getCommits($organization, $repository, $branch, $author, $since)) {
+                $commits[$branch] = $branchCommits;
+            }
+        }
+
+        return $commits;
+    }
+
+    protected function getCommits($organization, $repository, $branch, $author, DateTime $since)
+    {
+        $apicommits = $this->client->api('repo')
+            ->commits()
+            ->all(
+                $organization,
+                $repository,
+                array(
+                    'sha'    => $branch,
+                    'author' => $author,
+                    'since'  => $since->format(DateTime::ISO8601)
+                )
+            );
+
+        $commits = array();
+        foreach ($apicommits as $commit) {
+            $date = new DateTime($commit['commit']['author']['date']);
+            $diff = $since->diff($date);
+
+            // Since isn't perfect because of time offsets, so we check the author date for more accuracy
+            // This is especially true in cases where commits have been rebased and/or force-pushed
+            if ($diff->invert) {
+                continue;
+            }
+
+            $commits[] = array(
+                'sha'      => substr($commit['sha'], 0, 8),
+                'message'  => $commit['commit']['message'],
+                'comments' => $commit['commit']['comment_count'],
+                'url'      => $commit['html_url'],
+                'date'     => $commit['commit']['author']['date'],
+            );
+        }
+
+        return $commits;
+    }
+
+    protected function getPulls($organization, $repository, $author, DateTime $since)
+    {
+        $apipulls = $this->client->api('pull_request')
+            ->all(
+                $organization,
+                $repository,
+                'open'
+            );
+
+        $pulls = array();
+        foreach ($apipulls as $pull) {
+            if ($author && $pull['user']['login'] !== $author) {
+                continue;
+            }
+
+            if (new DateTime($pull['created_at']) < $since) {
+                continue;
+            }
+
+            $assignee = null;
+            if (! empty($pull['assignee'])) {
+                $assignee = $pull['assignee']['login'];
+            }
+
+            $pull = array(
+                'body'       => $pull['body'],
+                'url'        => $pull['html_url'],
+                'title'      => $pull['title'],
+                'created_at' => $pull['created_at'],
+                'from'       => $pull['head']['ref'],
+                'to'         => $pull['base']['ref'],
+                'assignee'   => $assignee,
+            );
+
+            $pulls[] = $pull;
+        }
+
+        return $pulls;
+    }
+}
+
+$console = new Application();
+$console->add(new GitHubCommand);
+$console->run();
