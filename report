@@ -43,14 +43,18 @@ class GitHubCommand extends Command
     protected function execute(InputInterface $input, OutputInterface $output)
     {
         // Parse config.yml if it exists, and set all the configuration
-        $config = Yaml::parse(__DIR__ . '/config.yml');
-        foreach ($config as $key => $value) {
-            if ($input->hasArgument($key)) {
-                $input->setArgument($key, $value);
-            } elseif ($input->hasOption($key)) {
-                $input->setOption($key, $value);
-            } else {
-                throw new \RuntimeException('Unrecognized config key: ' . $key);
+        $config = __DIR__ . '/config.yml';
+
+        if (file_exists($config)) {
+            $config = Yaml::parse($config);
+            foreach ($config as $key => $value) {
+                if ($input->hasArgument($key)) {
+                    $input->setArgument($key, $value);
+                } elseif ($input->hasOption($key)) {
+                    $input->setOption($key, $value);
+                } else {
+                    throw new \RuntimeException('Unrecognized config key: ' . $key);
+                }
             }
         }
 
