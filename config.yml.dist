@@ -1,0 +1,17 @@
+# GitHub
+token: mytoken
+
+# Filters
+author: You
+organization: YourOrg
+repository: TheirRepo
+since: today
+
+# Project
+dir: ../dir/to/your/project
+
+# Email
+emails: [ tothisguy@here.com, andthisgal@there.com ]
+from: sickofwriting@reports.com
+smtp_username: sickofwriting@reports.com
+smtp_password: mypassword
